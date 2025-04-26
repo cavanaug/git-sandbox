@@ -1,0 +1,990 @@
+#!/bin/bash
+#
+# git-sandbox: Local Git branch sandboxing tool for GitHub Flow
+#
+# Supports:
+#   - git sandbox <branch> [<base>] [--dry-run|--quiet|--no-color]      → Create a local sandbox branch
+#   - git sandbox-promote [<dst>] [--dry-run|--quiet|--yes|--force]      → Squash-merge sandbox into feature branch (default: sandbox-base)
+#   - git sandbox-cleanup [--dry-run|--quiet|--yes|--force]              → Delete all local sandbox branches
+#   - git sandbox-rebase [--dry-run|--quiet]                            → Rebase current sandbox branch to original base
+#   - git sandbox-tree [--dry-run|--quiet|--no-color]                   → Show local branch hierarchy including sandbox branches
+#   - git sandbox --bootstrap                                           → Auto-create symlinks for this tool
+#   - git sandbox --completion                                          → Print tab-completion script
+#   - git sandbox --help                                                → Show help message
+
+set -euo pipefail
+
+# Removed CMD, SELF_PATH, SCRIPT_DIR as symlinks are no longer supported
+
+QUIET=false
+DRY_RUN=false
+NO_COLOR=false
+NO_PROMPT=false
+FORCE=false
+VERBOSE=false          # Added for scratch-tree verbose output
+COMPLETE_PROMOTE=false # Added for promote --complete flag
+
+PRIMARY_BRANCH="main" # Or your preferred primary branch name
+
+color() {
+    $NO_COLOR && {
+        shift
+        echo "$@"
+        return
+    }
+    local code="$1"
+    shift
+    echo -e "\033[${code}m$*\033[0m"
+}
+
+echo_info() { $QUIET || color "1;34" "$@"; }
+echo_success() { $QUIET || color "1;32" "$@"; }
+echo_warn() { color "1;33" "$@"; }
+echo_error() { color "1;31" "$@" >&2; }
+
+run() {
+    # Always print the command being run (or simulated)
+    if $DRY_RUN; then
+        echo_info "DRY-RUN: git $*"
+    else
+        echo_info "RUNNING: git $*"
+        # Execute quietly, suppressing both stdout and stderr
+        git "$@" >/dev/null 2>&1
+    fi
+}
+
+print_help() {
+    cat <<EOF
+Usage: git-sandbox <subcommand> [options] [args...]
+
+Manage local Git sandbox branches for isolated experimentation.
+
+Subcommands:
+  create <branch> [<base>]       Create a local sandbox branch
+  promote [<dst>]                Squash-merge sandbox into its base branch
+  rebase                         Rebase current sandbox branch from its base
+  tree [-v|--verbose]            Show local branch hierarchy including sandboxes
+  completion                     Print bash completion script
+  --help                         (No subcommand) Show this help message
+
+Global Options (must precede subcommand):
+  --dry-run     Preview actions without executing them
+  --quiet       Suppress non-essential output
+  --no-color    Disable ANSI color output
+  --no-prompt   Disable interactive prompts (implied by --yes)
+  --yes         Assume 'yes' for all prompts (implies --no-prompt)
+  --force       Same as --yes and --no-prompt
+EOF
+}
+
+print_create_help() {
+    cat <<EOF
+Usage: git sandbox create <branch> [<base>] [options]
+
+Create a new local sandbox branch based off another branch.
+
+Arguments:
+  <branch>      Name for the new sandbox branch (will be prefixed with 'sandbox/')
+  <base>        Optional base branch to branch from (default: current or primary branch)
+
+Options:
+  --help        Show this help message
+EOF
+}
+
+print_tree_help() {
+    cat <<EOF
+Usage: git sandbox tree [options]
+
+Show local branch hierarchy including sandbox branches.
+
+Options:
+  -v, --verbose   Show detailed commit status (ahead/behind) relative to parent/upstream
+                  (This is a global option and must precede the 'tree' command)
+  --help        Show this help message
+EOF
+}
+
+print_promote_help() {
+    cat <<EOF
+Usage: git sandbox promote [<dst>] [options]
+
+Squash-merge current sandbox branch into a destination branch.
+Defaults to the sandbox branch's configured base branch.
+
+Arguments:
+  <dst>         Optional destination branch name (default: sandbox base)
+
+Options:
+  -c, --complete Delete the sandbox branch after successful promotion
+  --help        Show this help message
+EOF
+} # <<< Added missing closing brace
+
+print_rebase_help() {
+    cat <<EOF
+Usage: git sandbox rebase [options]
+
+Update the current sandbox branch with the latest changes from its configured base branch (via rebase).
+
+Options:
+  --help        Show this help message
+EOF
+} # <<< Added missing closing brace
+
+print_completion() {
+    cat <<'EOF'
+_git_sandbox_complete() {
+  local cur prev words cword subcommand
+  _init_completion || return
+
+  # Find the subcommand if it exists
+  subcommand=""
+  for (( i=1; i<cword; i++ )); do
+    local word="${words[i]}"
+    case "$word" in
+      # Known subcommands
+      create|promote|rebase|tree|completion) # Added completion
+        subcommand="$word"
+        break
+        ;;
+      # Stop searching if we hit flags or other args
+      -*) break ;;
+    esac
+  done
+
+  # Main command completion
+  if [[ "$prev" == "git-sandbox" ]]; then
+      # Removed --bootstrap, added completion subcommand
+      COMPREPLY=( $(compgen -W "create promote rebase tree completion --help --quiet --dry-run --no-color --no-prompt --yes --force" -- "$cur") )
+      return
+  fi
+
+  # Subcommand specific completion
+  case "$subcommand" in
+    create)
+      # Complete flags or branch names after 'create'
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--quiet --dry-run --no-color --help" -- "$cur") )
+      else
+        # Suggest existing local branches as potential base branches
+        COMPREPLY=( $(compgen -W "$(git branch --list --format='%(refname:short)')" -- "$cur") )
+      fi
+      ;;
+    promote)
+      # Promote takes an optional destination branch, flags, or -c/--complete
+      if [[ "$cur" == -* ]]; then
+         COMPREPLY=( $(compgen -W "--quiet --dry-run --yes --no-color --no-prompt --force -c --complete --help" -- "$cur") )
+      else
+         # Suggest existing local branches as potential destination branches
+         COMPREPLY=( $(compgen -W "$(git branch --list --format='%(refname:short)')" -- "$cur") )
+      fi
+      ;;
+    rebase)
+      # Rebase flags
+      COMPREPLY=( $(compgen -W "--quiet --dry-run --no-color --help" -- "$cur") )
+      ;;
+    tree)
+      # Tree flags
+      COMPREPLY=( $(compgen -W "--quiet --dry-run --no-color --verbose -v --help" -- "$cur") )
+      ;;
+  esac
+
+  # Removed fallback completion logic for symlinks
+}
+complete -F _git_sandbox_complete git-sandbox
+# Removed complete calls for symlinks
+EOF
+}
+
+create_sandbox_branch() {
+    # --- Argument Parsing for create ---
+    local sandbox_branch_arg=""
+    local base_branch_arg=""
+    while [[ $# -gt 0 ]]; do
+        local arg="$1" # Use local inside function
+        case "$arg" in
+        --help) print_create_help; exit 0 ;;
+        -*)
+            # Treat any flag other than --help as invalid for 'create'
+            echo_error "❌ Invalid option for 'git sandbox create': $arg"
+            echo "" >&2
+            print_create_help >&2
+            exit 1
+            ;;
+        *)
+            # Positional arguments
+            if [[ -z "$sandbox_branch_arg" ]]; then
+                sandbox_branch_arg="$arg"
+            elif [[ -z "$base_branch_arg" ]]; then
+                base_branch_arg="$arg"
+            else
+                # Too many positional arguments
+                echo_error "❌ Too many arguments for 'git sandbox create'."
+                echo "   Received branch: '$sandbox_branch_arg', base: '$base_branch_arg', extra: '$arg'" >&2
+                echo "" >&2
+                print_create_help >&2
+                exit 1
+            fi
+            ;;
+        esac
+        shift
+    done
+
+    # Check if required branch name is provided
+    if [[ -z "$sandbox_branch_arg" ]]; then
+        echo_error "❌ Missing branch name for 'git sandbox create'."
+        echo "" >&2
+        print_create_help >&2
+        exit 1
+    fi
+    # --- End Argument Parsing ---
+
+    # Use parsed arguments
+    local sandbox_branch="$sandbox_branch_arg"
+    # Base branch determination uses base_branch_arg if provided
+    local default_base
+    local current_branch
+    current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+    if [[ -n "$current_branch" && "$current_branch" == sandbox/* ]]; then
+        # Current branch is a sandbox branch, try to find its base
+        default_base=$(git config branch."$current_branch".sandbox-base || echo "$PRIMARY_BRANCH")
+    elif [[ -n "$current_branch" ]]; then
+        # Current branch is not a sandbox branch, use it as default base
+        default_base="$current_branch"
+    else
+        # Not on a branch (detached HEAD?) or error, fallback to primary
+        default_base="$PRIMARY_BRANCH"
+    fi
+
+    # Use provided base_branch_arg or the determined default
+    local base_branch="${base_branch_arg:-$default_base}"
+
+    echo_info "Using base branch: $base_branch"
+
+    # === Universal Cleanliness Check ===
+    # Check 1: Staged changes
+    # Use --cached to check the index against HEAD
+    if ! git diff --quiet --cached HEAD --; then
+        echo_error "❌ Staged changes detected."
+        echo_error "   Please commit or unstage them before creating a sandbox branch."
+        exit 1
+    fi
+    # Check 2: Unstaged changes to tracked files
+    if ! git diff-files --quiet; then
+        echo_error "❌ Unstaged changes detected in tracked files."
+        echo_error "   Please commit, stash, or revert them before creating a sandbox branch."
+        exit 1
+    fi
+    # Check 3: Untracked files (respecting .gitignore)
+    # `git ls-files --others --exclude-standard` lists untracked files. Check if the output is non-empty.
+    if [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+        echo_error "❌ Untracked files detected in the working directory."
+        echo_error "   Please add, commit, stash, or remove them before creating a sandbox branch."
+        # Optionally list the untracked files for clarity:
+        echo_error "   Untracked files:"
+        git ls-files --others --exclude-standard >&2
+        exit 1
+    fi
+    # === End Universal Check ===
+
+    # Ensure we are on the correct base branch before creating the scratch branch
+    # Only checkout if the base branch is not the current branch
+    if [[ "$base_branch" != "$current_branch" ]]; then
+        run checkout "$base_branch"
+    fi
+    # Now create the sandbox branch from the (now current) base branch
+    run checkout -b "sandbox/$sandbox_branch"
+
+    git config branch."sandbox/$sandbox_branch".sandbox-base "$base_branch"
+    echo_success "✔️  Created and switched to sandbox/$sandbox_branch (base: $base_branch)"
+}
+
+sandbox_promote_branch() {
+    # --- Argument Parsing for promote ---
+    local dest_branch_arg=""
+    local complete_promote_flag=false # Use local flag inside function
+    while [[ $# -gt 0 ]]; do
+        local arg="$1" # Use local inside function
+        case "$arg" in
+        -c | --complete) complete_promote_flag=true; shift ;; # Set local flag
+        --help) print_promote_help; exit 0 ;;
+        -*)
+            # Treat any flag other than --help or -c/--complete as invalid for 'promote'
+             echo_error "❌ Invalid option for 'git sandbox promote': $arg"
+             echo "" >&2
+             print_promote_help >&2
+             exit 1
+             ;;
+        *)
+            # Positional argument (destination branch)
+            if [[ -z "$dest_branch_arg" ]]; then
+                dest_branch_arg="$arg"
+                shift
+            else
+                echo_error "❌ Too many arguments for 'git sandbox promote'."
+                echo "   Received destination: '$dest_branch_arg', extra: '$arg'" >&2
+                echo "" >&2
+                print_promote_help >&2
+                exit 1
+            fi
+            ;;
+        esac
+        # Note: shift happens within cases that consume an arg
+    done
+    # --- End Argument Parsing ---
+
+    local current_branch
+    current_branch=$(git symbolic-ref --short HEAD)
+
+    if [[ "$current_branch" != sandbox/* ]]; then
+        echo_error "❌ Current branch '$current_branch' is not a sandbox branch."
+        exit 1
+    fi
+
+    local base_branch
+    base_branch=$(git config branch."$current_branch".sandbox-base || echo "$PRIMARY_BRANCH")
+
+    # Use parsed destination or default to sandbox-base
+    local dest_branch="${dest_branch_arg:-$base_branch}"
+    echo_info "Promoting $current_branch to $dest_branch by squashing on sandbox branch first..."
+
+    # === Pre-check: Ensure sandbox branch is not behind its base ===
+    local counts_vs_base behind_count
+    counts_vs_base=$(_get_ahead_behind "$current_branch" "$base_branch")
+    if [[ -n "$counts_vs_base" ]]; then
+        behind_count="${counts_vs_base##* }" # Extract the number after the space
+        if [[ "$behind_count" -gt 0 ]]; then
+            echo_error "❌ Sandbox branch '$current_branch' is $behind_count commit(s) behind its base '$base_branch'."
+            echo_error "   Please run 'git-sandbox-rebase' first to update it before promoting."
+            exit 1
+        fi
+    else
+        echo_warn "Warning: Could not determine ahead/behind status for '$current_branch' vs '$base_branch'. Proceeding with caution."
+    fi
+
+    # === Step 1: Squash commits on the sandbox branch ===
+    echo_info "Squashing commits on $current_branch relative to $base_branch..."
+    # Ensure we are on the sandbox branch (redundant check, but safe)
+    run checkout "$current_branch"
+
+    # Determine the target for soft reset: either the base branch or the last merge from the base branch
+    local reset_target="$base_branch" # Default target
+    local latest_merge second_parent is_base_ancestor
+    latest_merge=$(git log --merges -n 1 --pretty=%H "$current_branch" 2>/dev/null || true)
+
+    if [[ -n "$latest_merge" ]]; then
+        # Found a merge commit, check its second parent
+        second_parent=$(git rev-parse "${latest_merge}^2" 2>/dev/null || true)
+        if [[ -n "$second_parent" ]]; then
+            # Check if base_branch is an ancestor of the second parent
+            if git merge-base --is-ancestor "$base_branch" "$second_parent" 2>/dev/null; then
+                echo_info "ℹ️ Last merge from '$base_branch' found at commit $latest_merge. Squashing changes since then."
+                reset_target="$latest_merge"
+            else
+                echo_info "ℹ️ Latest merge commit ($latest_merge) is not from '$base_branch'. Squashing all changes since '$base_branch'."
+            fi
+        else
+            echo_warn "⚠️ Could not determine second parent of latest merge commit ($latest_merge). Squashing all changes since '$base_branch'."
+        fi
+    else
+        echo_info "ℹ️ No merge commits found on '$current_branch'. Squashing all changes since '$base_branch'."
+    fi
+
+    # Stage all changes since the determined reset target
+    echo_info "RUNNING: git reset --soft $reset_target"
+    if $DRY_RUN; then
+        echo_info "DRY-RUN: Would reset soft to $reset_target"
+    else
+        if ! git reset --soft "$reset_target"; then
+            echo_error "❌ Failed to reset soft on $current_branch to $reset_target."
+            exit 1
+        fi
+    fi
+
+    # Commit the squashed changes
+    if $DRY_RUN; then
+        echo_info "DRY-RUN: Would commit squashed changes (interactively if TTY, otherwise with default message)."
+    else
+        # Use --allow-empty in case the scratch branch had no new commits vs base
+        # Use --no-verify to skip pre-commit hooks during this automated step
+        local commit_cmd_base="git commit --allow-empty --no-verify"
+        local commit_failed=false
+
+        if [[ -t 1 ]]; then
+            # Interactive TTY: Let the user edit the message
+            echo_info "RUNNING: $commit_cmd_base (interactive editor will open)"
+            if ! $commit_cmd_base; then
+                commit_failed=true
+            fi
+        else
+            # Non-interactive: Use a default message
+            local squash_commit_msg="feat: Squash changes from $current_branch for promotion" # Keep 'feat:' prefix for conventional commits
+            echo_info "RUNNING: $commit_cmd_base -m \"$squash_commit_msg\""
+            if ! $commit_cmd_base -m "$squash_commit_msg"; then
+                commit_failed=true
+            fi
+        fi
+
+        if $commit_failed; then
+            echo_error "❌ Failed to commit squashed changes on $current_branch."
+            echo_error "   Your branch might be in an intermediate state. Please check 'git status'."
+            exit 1
+        fi
+        echo_info "✅ Squashed changes committed on $current_branch."
+    fi
+
+    # === Step 2: Merge the squashed sandbox branch into the destination ===
+    echo_info "Merging squashed $current_branch into $dest_branch..."
+    # Ensure the target branch exists and is up-to-date (if it's the primary branch)
+    if [[ "$dest_branch" == "$PRIMARY_BRANCH" ]]; then
+        run checkout "$PRIMARY_BRANCH"
+        run pull origin "$PRIMARY_BRANCH" # Only pull primary branch
+    elif ! git show-ref --verify --quiet refs/heads/"$dest_branch"; then
+        echo_error "❌ Destination branch '$dest_branch' does not exist locally."
+        # We modified the sandbox branch, maybe offer to revert? For now, just error out.
+        echo_error "   Sandbox branch $current_branch history was modified."
+        exit 1
+    else
+        # Checkout the existing destination branch
+        run checkout "$dest_branch"
+    fi
+
+    # Perform a non-fast-forward merge
+    run merge --no-ff "$current_branch"
+    # Check the exit status of the merge command if not in dry run
+    if ! $DRY_RUN; then
+        if ! git merge --no-ff "$current_branch"; then
+            echo_error "❌ Merge of $current_branch into $dest_branch failed."
+            echo_error "   Please resolve conflicts and commit, or abort the merge ('git merge --abort')."
+            # Don't print success message if merge failed
+            exit 1
+        fi
+    fi
+
+    echo_success "✔️  Promotion of $current_branch into $dest_branch complete."
+    echo_info "👉 The squashed changes have been merged into $dest_branch."
+    echo_info "   You may want to push $dest_branch now."
+
+    # Use the local flag parsed within this function
+    if $complete_promote_flag; then
+        # Delete the sandbox branch if --complete was specified
+        echo_info "ℹ️ --complete specified, deleting sandbox branch $current_branch..."
+        # Use the run helper which respects DRY_RUN
+        run branch -D "$current_branch"
+        if ! $DRY_RUN; then
+            echo_success "✔️  Sandbox branch $current_branch deleted."
+        fi
+    else
+        # If not completing, switch back and update the sandbox branch from its base
+        echo_info "ℹ️ Switching back to $current_branch and updating it from $base_branch..."
+        run checkout "$current_branch"
+        run rebase "$base_branch" # The command remains the same
+        if ! $DRY_RUN; then
+            # Check rebase success (simple check: are we still on the branch?)
+            local post_rebase_branch
+            post_rebase_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+            if [[ "$post_rebase_branch" == "$current_branch" ]]; then
+                echo_success "✔️  Updated $current_branch with latest changes from $base_branch."
+            else
+                echo_error "❌ Update (rebase) of $current_branch from $base_branch may have failed or is in progress."
+                echo_error "   Please check 'git status'."
+                # Exit with error if rebase likely failed
+                exit 1
+            fi # Closes inner if [[ "$post_rebase_branch" == "$current_branch" ]]
+        fi     # Closes outer if ! $DRY_RUN
+    fi         # Closes if $COMPLETE_PROMOTE
+}              # Closes function sandbox_promote_branch
+
+sandbox_rebase_branch() {
+    # --- Argument Parsing for rebase ---
+    while [[ $# -gt 0 ]]; do
+         local arg="$1" # Use local inside function
+         case "$arg" in
+         --help) print_rebase_help; exit 0 ;;
+         -*)
+             # Treat any flag other than --help as invalid for 'rebase'
+             echo_error "❌ Invalid option for 'git sandbox rebase': $arg"
+             echo "" >&2
+             print_rebase_help >&2
+             exit 1
+             ;;
+         *)
+             # No positional arguments allowed
+             echo_error "❌ Invalid arguments for 'git sandbox rebase': $*"
+             echo "" >&2
+             print_rebase_help >&2
+             exit 1
+             ;;
+         esac
+         shift # Consume the argument
+    done
+    # --- End Argument Parsing ---
+
+    local current_branch
+    current_branch=$(git symbolic-ref --short HEAD)
+
+    if [[ "$current_branch" != sandbox/* ]]; then
+        echo_error "❌ Current branch '$current_branch' is not a sandbox branch."
+        exit 1
+    fi
+
+    local base_branch
+    base_branch=$(git config branch."$current_branch".sandbox-base || echo "$PRIMARY_BRANCH")
+
+    # Rebase the current branch against its base
+    echo_info "ℹ️ Updating $current_branch with latest changes from $base_branch..."
+    run rebase "$base_branch"
+
+    # Check rebase success (simple check: are we still on the branch?)
+    if ! $DRY_RUN; then
+        local post_rebase_branch
+        post_rebase_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+        if [[ "$post_rebase_branch" == "$current_branch" ]]; then
+            echo_success "✔️  Updated $current_branch with latest changes from $base_branch."
+        else
+            echo_error "❌ Update (rebase) of $current_branch from $base_branch may have failed or is in progress."
+            echo_error "   Please check 'git status'."
+            # Exit with error if rebase likely failed
+            exit 1
+        fi
+    fi
+}
+
+# Helper function to get ahead/behind counts
+# Note: This helper function does not contain 'scratch' or 'sandbox' specific logic
+_get_ahead_behind() {
+    local branch1="$1"
+    local branch2="$2"
+    local counts
+    local ahead behind
+
+    # Ensure both branches exist before attempting comparison
+    # Check local heads first, then remotes for branch1
+    if ! git show-ref --verify --quiet "refs/heads/$branch1" &&
+        ! git show-ref --verify --quiet "refs/remotes/$branch1"; then
+        # branch1 doesn't exist locally or as a known remote ref
+        # echo_warn "Warning: Branch '$branch1' not found for comparison." >&2
+        return
+    fi
+    # Check local heads first, then remotes for branch2
+    if ! git show-ref --verify --quiet "refs/heads/$branch2" &&
+        ! git show-ref --verify --quiet "refs/remotes/$branch2"; then
+        # branch2 doesn't exist locally or as a known remote ref
+        # echo_warn "Warning: Branch '$branch2' not found for comparison." >&2
+        return
+    fi
+
+    # Use ... to compare tips, handle cases where one is ancestor of other or they diverged
+    # Suppress errors, e.g., if no common ancestor
+    counts=$(git rev-list --count --left-right "$branch1"..."$branch2" 2>/dev/null)
+
+    # Check if counts command failed or returned empty
+    if [[ -z "$counts" ]]; then
+        # echo_warn "Warning: Could not compare '$branch1' and '$branch2'." >&2
+        return
+    fi
+
+    read -r ahead behind <<<"$counts"
+
+    # Return the counts directly, let the caller format and decide whether to print "0 0"
+    echo "$ahead $behind"
+}
+
+# Function to print the branch tree recursively
+_print_branch_node() {
+    set +e # Temporarily disable exit on error for this function
+    local branch="$1"
+    local prefix="$2"
+    local children_map_name="$3"
+    local current_branch_name="$4"                 # Added current branch name parameter
+    local verbose_mode="$5"                        # Added verbose mode flag
+    local -n children_map_ref="$children_map_name" # Use nameref for associative array passing
+
+    local children_str="${children_map_ref[$branch]:-}"
+    local children_arr=()
+    # Read space-delimited words from the string into an array
+    read -r -a children_arr <<<"$children_str"
+
+    # Sort children alphabetically if the array is not empty
+    local sorted_children=()
+    if [[ ${#children_arr[@]} -gt 0 ]]; then
+        IFS=$'\n' sorted_children=($(sort <<<"$(printf "%s\n" "${children_arr[@]}")"))
+        unset IFS
+    fi
+
+    local count=${#sorted_children[@]} # Use sorted_children
+    local i=0
+
+    for child in "${sorted_children[@]}"; do # Use sorted_children
+        ((i++))
+        local connector="├── "
+        local next_prefix="│   "
+        if [[ $i -eq $count ]]; then
+            connector="└── "
+            next_prefix="    "
+        fi
+        # Determine leading character based on whether it's the current branch
+        local leading_char="  " # Default two spaces indent
+        if [[ "$child" == "$current_branch_name" ]]; then
+            leading_char="* " # Current branch indicator
+        fi
+        # Get commit info if verbose
+        local commit_info=""
+        local counts_parent counts_upstream
+        if $verbose_mode; then
+            # 1. Compare against parent branch (passed as $branch)
+            # Use standard ahead/behind calculation for all branches now
+            counts_parent=$(_get_ahead_behind "$child" "$branch")
+            if [[ "$counts_parent" == "0 0" ]]; then
+                commit_info+=" [current]"
+            elif [[ -n "$counts_parent" ]]; then # Non-empty and not "0 0"
+                commit_info+=" [${counts_parent%% *} ahead, ${counts_parent##* } behind]"
+            fi
+
+            # 2. Check for and compare against upstream remote for the child branch
+            local child_remote child_merge_ref child_remote_branch
+            child_remote=$(git config branch."$child".remote || true)
+            child_merge_ref=$(git config branch."$child".merge || true)
+            if [[ -n "$child_remote" && -n "$child_merge_ref" ]]; then
+                child_remote_branch="$child_remote/${child_merge_ref#refs/heads/}"
+                # Check if the remote branch actually exists before comparing
+                if git show-ref --verify --quiet "refs/remotes/$child_remote_branch"; then
+                    counts_upstream=$(_get_ahead_behind "$child" "$child_remote_branch")
+                    if [[ "$counts_upstream" == "0 0" ]]; then
+                        commit_info+=" [vs upstream: current]"
+                    elif [[ -n "$counts_upstream" ]]; then # Non-empty and not "0 0"
+                        commit_info+=" [vs upstream: ${counts_upstream%% *} ahead, ${counts_upstream##* } behind]"
+                    fi
+                    # else
+                    # Optional: Warn if configured remote doesn't exist?
+                    # echo_warn "Warning: Configured upstream '$child_remote_branch' for '$child' not found." >&2
+                fi
+            fi
+        fi
+        # Print the child branch with appropriate prefix and leading char
+        echo "${leading_char}${prefix}${connector}${child}${commit_info}"
+        # Recurse for the child branch, passing verbose mode down
+        _print_branch_node "$child" "${prefix}${next_prefix}" "$children_map_name" "$current_branch_name" "$verbose_mode"
+    done
+    set -e # Re-enable exit on error
+}
+
+sandbox_tree() {
+    # --- Argument Parsing for tree ---
+    # Note: -v/--verbose is parsed globally
+    while [[ $# -gt 0 ]]; do
+         local arg="$1" # Use local inside function
+         case "$arg" in
+         --help) print_tree_help; exit 0 ;;
+         # -v/--verbose was handled globally, ignore if seen here but don't error
+         -v|--verbose) shift ;;
+         -*)
+             # Treat any flag other than --help or -v/--verbose as invalid for 'tree'
+             echo_error "❌ Invalid option for 'git sandbox tree': $arg"
+             echo "" >&2
+             print_tree_help >&2
+             exit 1
+             ;;
+         *)
+             # No positional arguments allowed
+             echo_error "❌ Invalid arguments for 'git sandbox tree': $*"
+             echo "" >&2
+             print_tree_help >&2
+             exit 1
+             ;;
+         esac
+         # Shift happens within cases that consume args or at the end if needed
+         # Adding a general shift here in case -v was passed after subcommand
+         # shift # Re-evaluate if needed after testing
+         # Need shift here if arg wasn't consumed by a case (like --help, -v)
+         # Let's test without first, rely on shifts in cases.
+         # If -v is passed after 'tree', it should hit the '*' case.
+         # If --help is passed after 'tree', it hits the --help case and exits.
+         # If an unknown flag is passed, it hits the '-*' case and exits.
+         # If a positional arg is passed, it hits the '*' case and exits.
+         # Seems okay without a final shift.
+    done
+    # --- End Argument Parsing ---
+
+    echo_info "🌳 Identifying branch relationships..."
+
+    # Get current branch name
+    local current_branch_name
+    current_branch_name=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+    # Associative arrays require Bash 4+
+    if ((BASH_VERSINFO[0] < 4)); then
+        echo_error "❌ Bash 4.0 or higher is required for the tree command."
+        exit 1
+    fi
+
+    declare -A parents children all_local_branches remote_counterparts
+
+    # 1. Get all local branches
+    while IFS= read -r branch; do
+        # Ensure branch name is not empty
+        if [[ -n "$branch" ]]; then
+            all_local_branches["$branch"]=1
+        fi
+    done < <(git branch --format='%(refname:short)')
+
+    # 2. Populate relationships (sandbox-base parent, remote tracking) from config
+    for branch in "${!all_local_branches[@]}"; do
+        # Check for sandbox-base (defines structural parent)
+        local sandbox_parent
+        sandbox_parent=$(git config branch."$branch".sandbox-base || true)
+        if [[ -n "$sandbox_parent" ]]; then
+            parents["$branch"]="$sandbox_parent"
+            # Append child, ensuring space separation if list already exists
+            local existing_children="${children[$sandbox_parent]:-}"
+            if [[ -z "$existing_children" ]]; then
+                children["$sandbox_parent"]="$branch"
+            else
+                # Append with a leading space
+                children["$sandbox_parent"]="$existing_children $branch"
+            fi
+        fi
+
+        # Check for remote tracking branch (for display purposes)
+        local remote merge_ref remote_branch
+        remote=$(git config branch."$branch".remote || true)
+        merge_ref=$(git config branch."$branch".merge || true)
+        if [[ -n "$remote" && -n "$merge_ref" ]]; then
+            remote_branch="$remote/${merge_ref#refs/heads/}"
+            remote_counterparts["$branch"]="$remote_branch"
+        fi
+    done
+
+    # 3. Identify and categorize root branches (local, non-scratch)
+    local primary_roots=()
+    local tracking_roots=()
+    local local_only_roots=()
+
+    for branch in "${!all_local_branches[@]}"; do
+        # Skip sandbox branches
+        if [[ "$branch" == sandbox/* ]]; then
+            continue
+        fi
+
+        # Categorize
+        if [[ "$branch" == "$PRIMARY_BRANCH" || "$branch" == "master" ]]; then
+            primary_roots+=("$branch")
+        elif [[ -v "remote_counterparts[$branch]" ]]; then
+            tracking_roots+=("$branch")
+        else
+            local_only_roots+=("$branch")
+        fi
+    done
+
+    # 4. Sort roots within categories and combine in order
+    local sorted_roots=()
+    # Add primary roots (usually just one)
+    IFS=$'\n' sorted_primary=($(sort <<<"${primary_roots[*]}"))
+    unset IFS
+    sorted_roots+=("${sorted_primary[@]}")
+
+    # Add sorted tracking roots
+    IFS=$'\n' sorted_tracking=($(sort <<<"${tracking_roots[*]}"))
+    unset IFS
+    sorted_roots+=("${sorted_tracking[@]}")
+
+    # Add sorted local-only roots
+    IFS=$'\n' sorted_local_only=($(sort <<<"${local_only_roots[*]}"))
+    unset IFS
+    sorted_roots+=("${sorted_local_only[@]}")
+
+    # 5. Print the tree starting from the sorted roots
+    local first_root=true
+    declare -A printed_remotes # Keep track of remotes printed via <->
+    for branch in "${sorted_roots[@]}"; do
+        # Skip remote branches that were already printed via <-> notation
+        if [[ -v "printed_remotes[$branch]" ]]; then
+            continue
+        fi
+
+        # Add a blank line between root branches for clarity, except before the first one
+        if ! $first_root; then
+            echo ""
+        fi
+        first_root=false
+
+        local line_to_print="$branch"
+        local remote_b="${remote_counterparts[$branch]:-}"
+
+        # Check if it has a remote counterpart to display
+        if [[ -n "$remote_b" ]]; then
+            # We don't need to check if remote_b exists here, just display the config info
+            line_to_print="$branch  <->  $remote_b"
+            printed_remotes["$remote_b"]=1 # Mark remote as printed
+        fi
+
+        # Determine leading character based on whether it's the current branch
+        local leading_char="  " # Default two spaces indent
+        if [[ "$branch" == "$current_branch_name" ]]; then
+            leading_char="* " # Current branch indicator
+        fi
+
+        # Get commit info for root branch if verbose
+        local commit_info=""
+        if $VERBOSE; then
+            local comparison_target=""
+            if [[ -n "$remote_b" ]]; then
+                # Has a configured remote counterpart
+                comparison_target="$remote_b"
+            elif [[ "$branch" != "$PRIMARY_BRANCH" ]]; then
+                # Non-primary, non-remote-tracking branch: compare against local primary
+                comparison_target="$PRIMARY_BRANCH"
+            else
+                # Branch is PRIMARY_BRANCH: compare against its origin remote if it exists
+                local primary_remote="origin/$PRIMARY_BRANCH"
+                if git show-ref --verify --quiet "refs/remotes/$primary_remote"; then
+                    comparison_target="$primary_remote"
+                fi
+            fi
+
+            if [[ -n "$comparison_target" ]]; then
+                local counts
+                counts=$(_get_ahead_behind "$branch" "$comparison_target")
+                if [[ "$counts" == "0 0" ]]; then
+                    commit_info=" [current]"
+                elif [[ -n "$counts" ]]; then # Non-empty and not "0 0"
+                    # Format the counts for root branches (no "vs parent/upstream" needed here)
+                    commit_info=" [${counts%% *} ahead, ${counts##* } behind]"
+                fi
+            fi
+        fi
+
+        # Construct the final output line
+        local final_line="${leading_char}${branch}${commit_info}" # Branch name + commit info (if any)
+        if [[ -n "$remote_b" ]]; then
+            final_line+="  <->  $remote_b" # Append remote info if it exists
+            printed_remotes["$remote_b"]=1 # Mark remote as printed (moved here)
+        fi
+
+        echo "$final_line"
+        # Pass map names, current branch, and initial indent to the recursive helper function
+        # Pass verbose flag down
+        _print_branch_node "$branch" "" "children" "$current_branch_name" "$VERBOSE"
+    done
+}
+
+# --- Argument Parsing ---
+# Global flags must come BEFORE the subcommand
+
+subcommand=""
+subcommand_args=()
+
+while [[ $# -gt 0 ]]; do
+    arg="$1"
+    case $arg in
+    # Global Flags
+    --quiet | -q) QUIET=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --no-color) NO_COLOR=true; shift ;;
+    --no-prompt) NO_PROMPT=true; shift ;;
+    --yes) NO_PROMPT=true; shift ;; # --yes implies --no-prompt
+    --force) NO_PROMPT=true; FORCE=true; shift ;; # --force implies --yes and --no-prompt
+    -v | --verbose) VERBOSE=true; shift ;; # Primarily for tree, but parse globally
+
+    # Special Global Flags (act like commands)
+    # Removed --bootstrap case
+    # Removed --completion case (moved to subcommand)
+    --help)
+        print_help
+        exit 0
+        ;;
+
+    # Stop parsing global flags if we hit an argument that doesn't start with '-'
+    # OR if we hit '--' which explicitly ends flag parsing
+    --)
+        shift # Consume the '--'
+        break # Stop parsing flags, remaining args are positional
+        ;;
+    -*)
+        # This is a flag, but not a recognized global one.
+        # Assume it's the start of subcommand flags or an error.
+        # Break here, let the subcommand parsing handle it.
+        break
+        ;;
+    *)
+        # First non-flag argument is the subcommand
+        subcommand="$arg"
+        shift
+        # All remaining arguments are for the subcommand
+        subcommand_args=("$@")
+        break # Exit the global flag parsing loop
+        ;;
+    esac
+done
+
+# If subcommand_args is not empty here, it means the loop broke on a flag
+# that wasn't a global flag, or after '--'. Add the remaining args.
+if [[ -z "$subcommand" && ${#subcommand_args[@]} -eq 0 && $# -gt 0 ]]; then
+   # This happens if the loop broke on a non-global flag or '--'
+   # and we haven't assigned a subcommand yet.
+   # The current $1 might be the subcommand or a flag for it.
+   subcommand_args=("$@")
+fi
+
+
+# --- Command Dispatch ---
+
+# Script is always invoked as git-sandbox now, no need for outer case "$CMD"
+
+# Check if a subcommand was identified
+if [[ -z "$subcommand" ]]; then
+    # Could be an unknown global flag, or just no command given
+    if [[ ${#subcommand_args[@]} -gt 0 && "${subcommand_args[0]}" == -* ]]; then
+         echo_error "❌ Unknown global option: ${subcommand_args[0]}"
+    else
+         echo_error "❌ Missing subcommand."
+    fi
+    echo "" >&2
+    print_help >&2
+    exit 1
+fi
+
+# Set positional parameters for subcommand processing
+set -- "${subcommand_args[@]}"
+
+# Dispatch based on subcommand
+case "$subcommand" in
+create)
+    # Validation moved into create_sandbox_branch function
+    create_sandbox_branch "$@"
+    ;;
+promote)
+    # Validation moved into sandbox_promote_branch function
+    # Need to pass COMPLETE_PROMOTE status somehow, or handle it inside.
+    # Let's handle it inside the function.
+    sandbox_promote_branch "$@"
+    ;;
+rebase)
+    # Validation moved into sandbox_rebase_branch function
+    sandbox_rebase_branch "$@"
+    ;;
+tree)
+    # Validation moved into sandbox_tree function
+    sandbox_tree "$@"
+    ;;
+completion)
+    # Completion subcommand takes no arguments
+    if [[ $# -gt 0 ]]; then
+        echo_error "❌ Invalid arguments for 'git sandbox completion': $*" >&2
+        # Optionally print completion help or main help? For now, just error.
+        exit 1
+    fi
+    print_completion
+    ;;
+*)
+    echo_error "❌ Unknown subcommand: $subcommand"
+    echo "" >&2
+    print_help >&2
+    exit 1
+    ;;
+esac
+exit 0 # Exit successfully after handling a subcommand via git-sandbox
+# Removed all cases for git-sandbox-promote, git-sandbox-rebase, git-sandbox-tree
+# --- Removed duplicated command dispatch logic below ---
