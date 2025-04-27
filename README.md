@@ -97,23 +97,26 @@ Updates the *current* sandbox branch by rebasing it onto its configured base bra
 git sandbox rebase
 ```
 
-#### `tree [-v|--verbose]`
+#### `tree [--simple]`
 
-Displays a tree view of your local branches, highlighting sandbox relationships and the current branch (`*`).
+Displays a tree view of your local branches, highlighting sandbox relationships and the current branch (`*`). By default, it shows ahead/behind commit counts relative to the parent/upstream branch.
 
-*   `-v`, `--verbose`: Shows ahead/behind commit counts relative to the parent branch (for sandboxes) or upstream/primary branch (for others).
+*   `--simple`: Shows a simplified tree without the ahead/behind commit counts.
 
 ```bash
+# Show verbose tree (default)
 git sandbox tree
-git sandbox tree -v
+
+# Show simplified tree
+git sandbox tree --simple
 ```
 
-Example Output (`tree -v`):
+Example Output (default verbose `tree`):
 
 ```
-* main [1 ahead, 0 behind] <-> origin/main
-  ├── feature/new-login [2 ahead, 0 behind] <-> origin/feature/new-login
-  │   └── sandbox/refactor-auth [1 ahead, 0 behind]
+* main [⇡1, 0 behind] <-> origin/main
+  ├── feature/new-login [⇡2, 0 behind] <-> origin/feature/new-login
+  │   └── sandbox/refactor-auth [⇡1, 0 behind]
   └── sandbox/quick-test [current]
 ```
 

@@ -21,7 +21,7 @@ DRY_RUN=false
 NO_COLOR=false
 NO_PROMPT=false
 FORCE=false
-VERBOSE=false          # Added for scratch-tree verbose output
+# VERBOSE flag removed, tree is verbose by default
 COMPLETE_PROMOTE=false # Added for promote --complete flag
 
 PRIMARY_BRANCH="main" # Or your preferred primary branch name
@@ -63,7 +63,7 @@ Subcommands:
   start <branch> [<base>]        Start a new local sandbox branch
   publish [<dst>] [-c|--complete] Squash-merge sandbox into its base branch (publish changes)
   rebase                         Rebase current sandbox branch from its base
-  tree [-v|--verbose]            Show local branch hierarchy including sandboxes
+  tree [--simple]                Show local branch hierarchy including sandboxes (verbose by default)
   completion                     Print bash completion script
   --help                         (No subcommand) Show this help message
 
@@ -97,10 +97,10 @@ print_tree_help() {
 Usage: git sandbox tree [options]
 
 Show local branch hierarchy including sandbox branches.
+Output includes ahead/behind commit status by default.
 
 Options:
-  -v, --verbose   Show detailed commit status (ahead/behind) relative to parent/upstream
-                  (This is a global option and must precede the 'tree' command)
+  --simple      Show simplified output without commit status details.
   --help        Show this help message
 EOF
 }
@@ -186,7 +186,7 @@ _git_sandbox_complete() {
       ;;
     tree)
       # Tree flags
-      COMPREPLY=( $(compgen -W "--quiet --dry-run --no-color --verbose -v --help" -- "$cur") )
+      COMPREPLY=( $(compgen -W "--quiet --dry-run --no-color --simple --help" -- "$cur") )
       ;;
   esac
 
@@ -204,7 +204,10 @@ start_sandbox_branch() {
     while [[ $# -gt 0 ]]; do
         local arg="$1" # Use local inside function
         case "$arg" in
-        --help) print_start_help; exit 0 ;;
+        --help)
+            print_start_help
+            exit 0
+            ;;
         -*)
             # Treat any flag other than --help as invalid for 'start'
             echo_error "❌ Invalid option for 'git sandbox start': $arg"
@@ -308,15 +311,21 @@ sandbox_publish_branch() {
     while [[ $# -gt 0 ]]; do
         local arg="$1" # Use local inside function
         case "$arg" in
-        -c | --complete) complete_publish_flag=true; shift ;; # Set local flag
-        --help) print_publish_help; exit 0 ;;
+        -c | --complete)
+            complete_publish_flag=true
+            shift
+            ;; # Set local flag
+        --help)
+            print_publish_help
+            exit 0
+            ;;
         -*)
             # Treat any flag other than --help or -c/--complete as invalid for 'publish'
-             echo_error "❌ Invalid option for 'git sandbox publish': $arg"
-             echo "" >&2
-             print_publish_help >&2
-             exit 1
-             ;;
+            echo_error "❌ Invalid option for 'git sandbox publish': $arg"
+            echo "" >&2
+            print_publish_help >&2
+            exit 1
+            ;;
         *)
             # Positional argument (destination branch)
             if [[ -z "$dest_branch_arg" ]]; then
@@ -500,25 +509,28 @@ sandbox_publish_branch() {
 sandbox_rebase_branch() {
     # --- Argument Parsing for rebase ---
     while [[ $# -gt 0 ]]; do
-         local arg="$1" # Use local inside function
-         case "$arg" in
-         --help) print_rebase_help; exit 0 ;;
-         -*)
-             # Treat any flag other than --help as invalid for 'rebase'
-             echo_error "❌ Invalid option for 'git sandbox rebase': $arg"
-             echo "" >&2
-             print_rebase_help >&2
-             exit 1
-             ;;
-         *)
-             # No positional arguments allowed
-             echo_error "❌ Invalid arguments for 'git sandbox rebase': $*"
-             echo "" >&2
-             print_rebase_help >&2
-             exit 1
-             ;;
-         esac
-         shift # Consume the argument
+        local arg="$1" # Use local inside function
+        case "$arg" in
+        --help)
+            print_rebase_help
+            exit 0
+            ;;
+        -*)
+            # Treat any flag other than --help as invalid for 'rebase'
+            echo_error "❌ Invalid option for 'git sandbox rebase': $arg"
+            echo "" >&2
+            print_rebase_help >&2
+            exit 1
+            ;;
+        *)
+            # No positional arguments allowed
+            echo_error "❌ Invalid arguments for 'git sandbox rebase': $*"
+            echo "" >&2
+            print_rebase_help >&2
+            exit 1
+            ;;
+        esac
+        shift # Consume the argument
     done
     # --- End Argument Parsing ---
 
@@ -593,13 +605,14 @@ _get_ahead_behind() {
 }
 
 # Function to print the branch tree recursively
+# Parameters: branch, prefix, children_map_name, current_branch_name, verbose_mode
 _print_branch_node() {
     set +e # Temporarily disable exit on error for this function
     local branch="$1"
     local prefix="$2"
     local children_map_name="$3"
-    local current_branch_name="$4"                 # Added current branch name parameter
-    local verbose_mode="$5"                        # Added verbose mode flag
+    local current_branch_name="$4"
+    local verbose_mode="$5"                        # Boolean flag (true for verbose, false for simple)
     local -n children_map_ref="$children_map_name" # Use nameref for associative array passing
 
     local children_str="${children_map_ref[$branch]:-}"
@@ -639,8 +652,8 @@ _print_branch_node() {
             counts_parent=$(_get_ahead_behind "$child" "$branch")
             if [[ "$counts_parent" == "0 0" ]]; then
                 commit_info+=" [current]"
-            elif [[ -n "$counts_parent" ]]; then # Non-empty and not "0 0"
-                commit_info+=" [${counts_parent%% *} ahead, ${counts_parent##* } behind]"
+            elif [[ -n "$counts_parent" ]]; then                                # Non-empty and not "0 0"
+                commit_info+=" [ ${counts_parent%% *}  ${counts_parent##* }]" # Use ⇡ for ahead
             fi
 
             # 2. Check for and compare against upstream remote for the child branch
@@ -654,8 +667,8 @@ _print_branch_node() {
                     counts_upstream=$(_get_ahead_behind "$child" "$child_remote_branch")
                     if [[ "$counts_upstream" == "0 0" ]]; then
                         commit_info+=" [vs upstream: current]"
-                    elif [[ -n "$counts_upstream" ]]; then # Non-empty and not "0 0"
-                        commit_info+=" [vs upstream: ${counts_upstream%% *} ahead, ${counts_upstream##* } behind]"
+                    elif [[ -n "$counts_upstream" ]]; then                                                    # Non-empty and not "0 0"
+                        commit_info+=" [vs upstream: ⇡${counts_upstream%% *}, ${counts_upstream##* } behind]" # Use ⇡ for ahead
                     fi
                     # else
                     # Optional: Warn if configured remote doesn't exist?
@@ -672,40 +685,43 @@ _print_branch_node() {
 }
 
 sandbox_tree() {
-    # --- Argument Parsing for tree ---
-    # Note: -v/--verbose is parsed globally
+    # --- Argument Parsing specific to tree ---
+    local verbose_mode=true # Default to verbose output
+    local tree_args=()      # Store non-flag arguments if needed (currently none expected)
+
     while [[ $# -gt 0 ]]; do
-         local arg="$1" # Use local inside function
-         case "$arg" in
-         --help) print_tree_help; exit 0 ;;
-         # -v/--verbose was handled globally, ignore if seen here but don't error
-         -v|--verbose) shift ;;
-         -*)
-             # Treat any flag other than --help or -v/--verbose as invalid for 'tree'
-             echo_error "❌ Invalid option for 'git sandbox tree': $arg"
-             echo "" >&2
-             print_tree_help >&2
-             exit 1
-             ;;
-         *)
-             # No positional arguments allowed
-             echo_error "❌ Invalid arguments for 'git sandbox tree': $*"
-             echo "" >&2
-             print_tree_help >&2
-             exit 1
-             ;;
-         esac
-         # Shift happens within cases that consume args or at the end if needed
-         # Adding a general shift here in case -v was passed after subcommand
-         # shift # Re-evaluate if needed after testing
-         # Need shift here if arg wasn't consumed by a case (like --help, -v)
-         # Let's test without first, rely on shifts in cases.
-         # If -v is passed after 'tree', it should hit the '*' case.
-         # If --help is passed after 'tree', it hits the --help case and exits.
-         # If an unknown flag is passed, it hits the '-*' case and exits.
-         # If a positional arg is passed, it hits the '*' case and exits.
-         # Seems okay without a final shift.
+        local arg="$1"
+        case "$arg" in
+        --simple)
+            verbose_mode=false
+            shift
+            ;;
+        --help)
+            print_tree_help
+            exit 0
+            ;;
+        -*)
+            # Unknown flag specific to tree
+            echo_error "❌ Invalid option for 'git sandbox tree': $arg"
+            echo "" >&2
+            print_tree_help >&2
+            exit 1
+            ;;
+        *)
+            # Positional arguments are not expected for tree
+            tree_args+=("$arg") # Store it for potential error message
+            shift
+            ;;
+        esac
     done
+
+    # Check for unexpected positional arguments
+    if [[ ${#tree_args[@]} -gt 0 ]]; then
+        echo_error "❌ Invalid arguments for 'git sandbox tree': ${tree_args[*]}"
+        echo "" >&2
+        print_tree_help >&2
+        exit 1
+    fi
     # --- End Argument Parsing ---
 
     echo_info "🌳 Identifying branch relationships..."
@@ -826,9 +842,9 @@ sandbox_tree() {
             leading_char="* " # Current branch indicator
         fi
 
-        # Get commit info for root branch if verbose
+        # Get commit info for root branch if verbose mode is enabled
         local commit_info=""
-        if $VERBOSE; then
+        if $verbose_mode; then # Use the local verbose_mode variable
             local comparison_target=""
             if [[ -n "$remote_b" ]]; then
                 # Has a configured remote counterpart
@@ -851,7 +867,7 @@ sandbox_tree() {
                     commit_info=" [current]"
                 elif [[ -n "$counts" ]]; then # Non-empty and not "0 0"
                     # Format the counts for root branches (no "vs parent/upstream" needed here)
-                    commit_info=" [${counts%% *} ahead, ${counts##* } behind]"
+                    commit_info=" [ ${counts%% *}  ${counts##* }]" # Use ⇡ for ahead
                 fi
             fi
         fi
@@ -864,9 +880,8 @@ sandbox_tree() {
         fi
 
         echo "$final_line"
-        # Pass map names, current branch, and initial indent to the recursive helper function
-        # Pass verbose flag down
-        _print_branch_node "$branch" "" "children" "$current_branch_name" "$VERBOSE"
+        # Pass map names, current branch, initial indent, and verbose mode to the recursive helper
+        _print_branch_node "$branch" "" "children" "$current_branch_name" "$verbose_mode"
     done
 }
 
@@ -880,13 +895,32 @@ while [[ $# -gt 0 ]]; do
     arg="$1"
     case $arg in
     # Global Flags
-    --quiet | -q) QUIET=true; shift ;;
-    --dry-run) DRY_RUN=true; shift ;;
-    --no-color) NO_COLOR=true; shift ;;
-    --no-prompt) NO_PROMPT=true; shift ;;
-    --yes) NO_PROMPT=true; shift ;; # --yes implies --no-prompt
-    --force) NO_PROMPT=true; FORCE=true; shift ;; # --force implies --yes and --no-prompt
-    -v | --verbose) VERBOSE=true; shift ;; # Primarily for tree, but parse globally
+    --quiet | -q)
+        QUIET=true
+        shift
+        ;;
+    --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+    --no-color)
+        NO_COLOR=true
+        shift
+        ;;
+    --no-prompt)
+        NO_PROMPT=true
+        shift
+        ;;
+    --yes)
+        NO_PROMPT=true
+        shift
+        ;; # --yes implies --no-prompt
+    --force)
+        NO_PROMPT=true
+        FORCE=true
+        shift
+        ;; # --force implies --yes and --no-prompt
+    # -v / --verbose global flag removed
 
     # Special Global Flags (act like commands)
     # Removed --bootstrap case
@@ -922,12 +956,11 @@ done
 # If subcommand_args is not empty here, it means the loop broke on a flag
 # that wasn't a global flag, or after '--'. Add the remaining args.
 if [[ -z "$subcommand" && ${#subcommand_args[@]} -eq 0 && $# -gt 0 ]]; then
-   # This happens if the loop broke on a non-global flag or '--'
-   # and we haven't assigned a subcommand yet.
-   # The current $1 might be the subcommand or a flag for it.
-   subcommand_args=("$@")
+    # This happens if the loop broke on a non-global flag or '--'
+    # and we haven't assigned a subcommand yet.
+    # The current $1 might be the subcommand or a flag for it.
+    subcommand_args=("$@")
 fi
-
 
 # --- Command Dispatch ---
 
@@ -937,9 +970,9 @@ fi
 if [[ -z "$subcommand" ]]; then
     # Could be an unknown global flag, or just no command given
     if [[ ${#subcommand_args[@]} -gt 0 && "${subcommand_args[0]}" == -* ]]; then
-         echo_error "❌ Unknown global option: ${subcommand_args[0]}"
+        echo_error "❌ Unknown global option: ${subcommand_args[0]}"
     else
-         echo_error "❌ Missing subcommand."
+        echo_error "❌ Missing subcommand."
     fi
     echo "" >&2
     print_help >&2
