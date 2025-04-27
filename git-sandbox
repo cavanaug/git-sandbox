@@ -60,8 +60,8 @@ Usage: git-sandbox <subcommand> [options] [args...]
 Manage local Git sandbox branches for isolated experimentation.
 
 Subcommands:
-  create <branch> [<base>]       Create a local sandbox branch
-  promote [<dst>]                Squash-merge sandbox into its base branch
+  start <branch> [<base>]        Start a new local sandbox branch
+  publish [<dst>] [-c|--complete] Squash-merge sandbox into its base branch (publish changes)
   rebase                         Rebase current sandbox branch from its base
   tree [-v|--verbose]            Show local branch hierarchy including sandboxes
   completion                     Print bash completion script
@@ -77,11 +77,11 @@ Global Options (must precede subcommand):
 EOF
 }
 
-print_create_help() {
+print_start_help() {
     cat <<EOF
-Usage: git sandbox create <branch> [<base>] [options]
+Usage: git sandbox start <branch> [<base>] [options]
 
-Create a new local sandbox branch based off another branch.
+Start a new local sandbox branch based off another branch.
 
 Arguments:
   <branch>      Name for the new sandbox branch (will be prefixed with 'sandbox/')
@@ -105,21 +105,21 @@ Options:
 EOF
 }
 
-print_promote_help() {
+print_publish_help() {
     cat <<EOF
-Usage: git sandbox promote [<dst>] [options]
+Usage: git sandbox publish [<dst>] [options]
 
-Squash-merge current sandbox branch into a destination branch.
+Squash-merge current sandbox branch into a destination branch (publish changes).
 Defaults to the sandbox branch's configured base branch.
 
 Arguments:
   <dst>         Optional destination branch name (default: sandbox base)
 
 Options:
-  -c, --complete Delete the sandbox branch after successful promotion
+  -c, --complete Delete the sandbox branch after successful publish
   --help        Show this help message
 EOF
-} # <<< Added missing closing brace
+}
 
 print_rebase_help() {
     cat <<EOF
@@ -144,7 +144,7 @@ _git_sandbox_complete() {
     local word="${words[i]}"
     case "$word" in
       # Known subcommands
-      create|promote|rebase|tree|completion) # Added completion
+      start|publish|rebase|tree|completion) # Renamed promote to publish
         subcommand="$word"
         break
         ;;
@@ -155,15 +155,15 @@ _git_sandbox_complete() {
 
   # Main command completion
   if [[ "$prev" == "git-sandbox" ]]; then
-      # Removed --bootstrap, added completion subcommand
-      COMPREPLY=( $(compgen -W "create promote rebase tree completion --help --quiet --dry-run --no-color --no-prompt --yes --force" -- "$cur") )
+      # Renamed promote to publish
+      COMPREPLY=( $(compgen -W "start publish rebase tree completion --help --quiet --dry-run --no-color --no-prompt --yes --force" -- "$cur") )
       return
   fi
 
   # Subcommand specific completion
   case "$subcommand" in
-    create)
-      # Complete flags or branch names after 'create'
+    start)
+      # Complete flags or branch names after 'start'
       if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "--quiet --dry-run --no-color --help" -- "$cur") )
       else
@@ -171,8 +171,8 @@ _git_sandbox_complete() {
         COMPREPLY=( $(compgen -W "$(git branch --list --format='%(refname:short)')" -- "$cur") )
       fi
       ;;
-    promote)
-      # Promote takes an optional destination branch, flags, or -c/--complete
+    publish)
+      # Publish takes an optional destination branch, flags, or -c/--complete
       if [[ "$cur" == -* ]]; then
          COMPREPLY=( $(compgen -W "--quiet --dry-run --yes --no-color --no-prompt --force -c --complete --help" -- "$cur") )
       else
@@ -197,19 +197,19 @@ complete -F _git_sandbox_complete git-sandbox
 EOF
 }
 
-create_sandbox_branch() {
-    # --- Argument Parsing for create ---
+start_sandbox_branch() {
+    # --- Argument Parsing for start ---
     local sandbox_branch_arg=""
     local base_branch_arg=""
     while [[ $# -gt 0 ]]; do
         local arg="$1" # Use local inside function
         case "$arg" in
-        --help) print_create_help; exit 0 ;;
+        --help) print_start_help; exit 0 ;;
         -*)
-            # Treat any flag other than --help as invalid for 'create'
-            echo_error "❌ Invalid option for 'git sandbox create': $arg"
+            # Treat any flag other than --help as invalid for 'start'
+            echo_error "❌ Invalid option for 'git sandbox start': $arg"
             echo "" >&2
-            print_create_help >&2
+            print_start_help >&2
             exit 1
             ;;
         *)
@@ -220,10 +220,10 @@ create_sandbox_branch() {
                 base_branch_arg="$arg"
             else
                 # Too many positional arguments
-                echo_error "❌ Too many arguments for 'git sandbox create'."
+                echo_error "❌ Too many arguments for 'git sandbox start'."
                 echo "   Received branch: '$sandbox_branch_arg', base: '$base_branch_arg', extra: '$arg'" >&2
                 echo "" >&2
-                print_create_help >&2
+                print_start_help >&2
                 exit 1
             fi
             ;;
@@ -233,9 +233,9 @@ create_sandbox_branch() {
 
     # Check if required branch name is provided
     if [[ -z "$sandbox_branch_arg" ]]; then
-        echo_error "❌ Missing branch name for 'git sandbox create'."
+        echo_error "❌ Missing branch name for 'git sandbox start'."
         echo "" >&2
-        print_create_help >&2
+        print_start_help >&2
         exit 1
     fi
     # --- End Argument Parsing ---
@@ -268,20 +268,20 @@ create_sandbox_branch() {
     # Use --cached to check the index against HEAD
     if ! git diff --quiet --cached HEAD --; then
         echo_error "❌ Staged changes detected."
-        echo_error "   Please commit or unstage them before creating a sandbox branch."
+        echo_error "   Please commit or unstage them before starting a sandbox branch."
         exit 1
     fi
     # Check 2: Unstaged changes to tracked files
     if ! git diff-files --quiet; then
         echo_error "❌ Unstaged changes detected in tracked files."
-        echo_error "   Please commit, stash, or revert them before creating a sandbox branch."
+        echo_error "   Please commit, stash, or revert them before starting a sandbox branch."
         exit 1
     fi
     # Check 3: Untracked files (respecting .gitignore)
     # `git ls-files --others --exclude-standard` lists untracked files. Check if the output is non-empty.
     if [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
         echo_error "❌ Untracked files detected in the working directory."
-        echo_error "   Please add, commit, stash, or remove them before creating a sandbox branch."
+        echo_error "   Please add, commit, stash, or remove them before starting a sandbox branch."
         # Optionally list the untracked files for clarity:
         echo_error "   Untracked files:"
         git ls-files --others --exclude-standard >&2
@@ -289,7 +289,7 @@ create_sandbox_branch() {
     fi
     # === End Universal Check ===
 
-    # Ensure we are on the correct base branch before creating the scratch branch
+    # Ensure we are on the correct base branch before starting the sandbox branch
     # Only checkout if the base branch is not the current branch
     if [[ "$base_branch" != "$current_branch" ]]; then
         run checkout "$base_branch"
@@ -298,23 +298,23 @@ create_sandbox_branch() {
     run checkout -b "sandbox/$sandbox_branch"
 
     git config branch."sandbox/$sandbox_branch".sandbox-base "$base_branch"
-    echo_success "✔️  Created and switched to sandbox/$sandbox_branch (base: $base_branch)"
+    echo_success "✔️  Started and switched to sandbox/$sandbox_branch (base: $base_branch)"
 }
 
-sandbox_promote_branch() {
-    # --- Argument Parsing for promote ---
+sandbox_publish_branch() {
+    # --- Argument Parsing for publish ---
     local dest_branch_arg=""
-    local complete_promote_flag=false # Use local flag inside function
+    local complete_publish_flag=false # Use local flag inside function
     while [[ $# -gt 0 ]]; do
         local arg="$1" # Use local inside function
         case "$arg" in
-        -c | --complete) complete_promote_flag=true; shift ;; # Set local flag
-        --help) print_promote_help; exit 0 ;;
+        -c | --complete) complete_publish_flag=true; shift ;; # Set local flag
+        --help) print_publish_help; exit 0 ;;
         -*)
-            # Treat any flag other than --help or -c/--complete as invalid for 'promote'
-             echo_error "❌ Invalid option for 'git sandbox promote': $arg"
+            # Treat any flag other than --help or -c/--complete as invalid for 'publish'
+             echo_error "❌ Invalid option for 'git sandbox publish': $arg"
              echo "" >&2
-             print_promote_help >&2
+             print_publish_help >&2
              exit 1
              ;;
         *)
@@ -323,10 +323,10 @@ sandbox_promote_branch() {
                 dest_branch_arg="$arg"
                 shift
             else
-                echo_error "❌ Too many arguments for 'git sandbox promote'."
+                echo_error "❌ Too many arguments for 'git sandbox publish'."
                 echo "   Received destination: '$dest_branch_arg', extra: '$arg'" >&2
                 echo "" >&2
-                print_promote_help >&2
+                print_publish_help >&2
                 exit 1
             fi
             ;;
@@ -348,7 +348,7 @@ sandbox_promote_branch() {
 
     # Use parsed destination or default to sandbox-base
     local dest_branch="${dest_branch_arg:-$base_branch}"
-    echo_info "Promoting $current_branch to $dest_branch by squashing on sandbox branch first..."
+    echo_info "Publishing $current_branch to $dest_branch by squashing on sandbox branch first..."
 
     # === Pre-check: Ensure sandbox branch is not behind its base ===
     local counts_vs_base behind_count
@@ -357,7 +357,7 @@ sandbox_promote_branch() {
         behind_count="${counts_vs_base##* }" # Extract the number after the space
         if [[ "$behind_count" -gt 0 ]]; then
             echo_error "❌ Sandbox branch '$current_branch' is $behind_count commit(s) behind its base '$base_branch'."
-            echo_error "   Please run 'git-sandbox-rebase' first to update it before promoting."
+            echo_error "   Please run 'git sandbox rebase' first to update it before publishing."
             exit 1
         fi
     else
@@ -420,7 +420,7 @@ sandbox_promote_branch() {
             fi
         else
             # Non-interactive: Use a default message
-            local squash_commit_msg="feat: Squash changes from $current_branch for promotion" # Keep 'feat:' prefix for conventional commits
+            local squash_commit_msg="feat: Squash changes from $current_branch for publishing" # Keep 'feat:' prefix for conventional commits
             echo_info "RUNNING: $commit_cmd_base -m \"$squash_commit_msg\""
             if ! $commit_cmd_base -m "$squash_commit_msg"; then
                 commit_failed=true
@@ -463,12 +463,12 @@ sandbox_promote_branch() {
         fi
     fi
 
-    echo_success "✔️  Promotion of $current_branch into $dest_branch complete."
+    echo_success "✔️  Publish of $current_branch into $dest_branch complete."
     echo_info "👉 The squashed changes have been merged into $dest_branch."
     echo_info "   You may want to push $dest_branch now."
 
     # Use the local flag parsed within this function
-    if $complete_promote_flag; then
+    if $complete_publish_flag; then
         # Delete the sandbox branch if --complete was specified
         echo_info "ℹ️ --complete specified, deleting sandbox branch $current_branch..."
         # Use the run helper which respects DRY_RUN
@@ -494,8 +494,8 @@ sandbox_promote_branch() {
                 exit 1
             fi # Closes inner if [[ "$post_rebase_branch" == "$current_branch" ]]
         fi     # Closes outer if ! $DRY_RUN
-    fi         # Closes if $COMPLETE_PROMOTE
-}              # Closes function sandbox_promote_branch
+    fi         # Closes if $complete_publish_flag
+}              # Closes function sandbox_publish_branch
 
 sandbox_rebase_branch() {
     # --- Argument Parsing for rebase ---
@@ -951,15 +951,14 @@ set -- "${subcommand_args[@]}"
 
 # Dispatch based on subcommand
 case "$subcommand" in
-create)
-    # Validation moved into create_sandbox_branch function
-    create_sandbox_branch "$@"
+start)
+    # Validation moved into start_sandbox_branch function
+    start_sandbox_branch "$@"
     ;;
-promote)
-    # Validation moved into sandbox_promote_branch function
-    # Need to pass COMPLETE_PROMOTE status somehow, or handle it inside.
-    # Let's handle it inside the function.
-    sandbox_promote_branch "$@"
+publish)
+    # Validation moved into sandbox_publish_branch function
+    # COMPLETE_PROMOTE flag is handled inside the function.
+    sandbox_publish_branch "$@"
     ;;
 rebase)
     # Validation moved into sandbox_rebase_branch function
