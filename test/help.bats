@@ -27,16 +27,16 @@ setup() {
   assert_output --partial "Usage: git-sandbox <subcommand>"
 }
 
-@test "create subcommand --help shows usage" {
-  run git-sandbox create --help
+@test "start subcommand --help shows usage" {
+  run git-sandbox start --help
   assert_success
-  assert_output --partial "Usage: git sandbox create"
+  assert_output --partial "Usage: git sandbox start"
 }
 
-@test "promote subcommand --help shows usage" {
-  run git-sandbox promote --help
+@test "publish subcommand --help shows usage" {
+  run git-sandbox publish --help
   assert_success
-  assert_output --partial "Usage: git sandbox promote"
+  assert_output --partial "Usage: git sandbox publish"
 }
 
 @test "rebase subcommand --help shows usage" {
@@ -59,16 +59,16 @@ setup() {
   assert_output --partial "Unknown global option: --foo"
 }
 
-@test "create subcommand with invalid option fails" {
-  run git-sandbox create mybranch --foo
+@test "start subcommand with invalid option fails" {
+  run git-sandbox start mybranch --foo
   assert_failure
-  assert_output --partial "Invalid option for 'git sandbox create': --foo"
+  assert_output --partial "Invalid option for 'git sandbox start': --foo"
 }
 
-@test "promote subcommand with invalid option fails" {
-  run git-sandbox promote --foo
+@test "publish subcommand with invalid option fails" {
+  run git-sandbox publish --foo
   assert_failure
-  assert_output --partial "Invalid option for 'git sandbox promote': --foo"
+  assert_output --partial "Invalid option for 'git sandbox publish': --foo"
 }
 
 @test "rebase subcommand with invalid option fails" {
