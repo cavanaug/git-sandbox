@@ -49,6 +49,15 @@ setup() {
   run git-sandbox tree --help
   assert_success
   assert_output --partial "Usage: git sandbox tree"
+  assert_output --partial "--simple" # Check for the new flag
+  refute_output --partial "-v, --verbose" # Ensure old flag is gone
+}
+
+@test "tree subcommand --simple shows help" {
+  # Ensure --simple isn't treated as an invalid flag before --help
+  run git-sandbox tree --simple --help
+  assert_success
+  assert_output --partial "Usage: git sandbox tree"
 }
 
 # --- Tests for invalid options ---
@@ -77,8 +86,16 @@ setup() {
   assert_output --partial "Invalid option for 'git sandbox rebase': --foo"
 }
 
+# Test invalid flag specifically for tree subcommand
 @test "tree subcommand with invalid option fails" {
   run git-sandbox tree --foo
   assert_failure
   assert_output --partial "Invalid option for 'git sandbox tree': --foo"
+}
+
+# Test invalid positional argument for tree subcommand
+@test "tree subcommand with invalid argument fails" {
+  run git-sandbox tree myargument
+  assert_failure
+  assert_output --partial "Invalid arguments for 'git sandbox tree': myargument"
 }
