@@ -114,11 +114,12 @@ git sandbox tree --simple
 Example Output (default verbose `tree`):
 
 ```
-* main [⇡1, 0 behind] <-> origin/main
-  ├── feature/new-login [⇡2, 0 behind] <-> origin/feature/new-login
-  │   └── sandbox/refactor-auth [⇡1, 0 behind]
+* main [ 1  0] <-> origin/main {2025-04-28 10:30:00}
+  ├── feature/new-login [ 2  0] [vs upstream {2025-04-28 10:25:15}: current] <-> origin/feature/new-login {2025-04-28 10:25:15}
+  │   └── sandbox/refactor-auth [ 1  0]
   └── sandbox/quick-test [current]
 ```
+*(Note: Timestamps like "{2025-04-28 10:30:00}" are examples and will reflect the actual time since the last fetch)*
 
 #### `completion`
 
