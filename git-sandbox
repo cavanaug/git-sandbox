@@ -564,6 +564,26 @@ sandbox_rebase_branch() {
     fi
 }
 
+# Helper function to get the absolute timestamp {YYYY-MM-DD HH:MM:SS} of the last fetch/update for a remote ref
+_get_remote_fetch_timestamp() {
+    local remote_ref="$1" # Expects full ref like refs/remotes/origin/main
+    local formatted_timestamp=""
+
+    # Use git reflog to get the committer date (%cd) of the last entry for the remote ref,
+    # formatted directly using --date=format.
+    # head -n 1 gets the most recent entry.
+    # We need the committer date (%cd) as reflog entries represent actions, and committer date reflects when the action happened (fetch).
+    formatted_timestamp=$(git reflog show --date=format:'%Y-%m-%d %H:%M:%S' --format='%cd' "$remote_ref" 2>/dev/null | head -n 1)
+
+    # Check if we got a timestamp
+    if [[ -n "$formatted_timestamp" ]]; then
+        echo "{${formatted_timestamp}}" # Return formatted timestamp in braces
+    else
+        echo "" # Return empty string if not found or error
+    fi
+}
+
+
 # Helper function to get ahead/behind counts
 # Note: This helper function does not contain 'scratch' or 'sandbox' specific logic
 _get_ahead_behind() {
@@ -662,13 +682,20 @@ _print_branch_node() {
             child_merge_ref=$(git config branch."$child".merge || true)
             if [[ -n "$child_remote" && -n "$child_merge_ref" ]]; then
                 child_remote_branch="$child_remote/${child_merge_ref#refs/heads/}"
+                local full_remote_ref="refs/remotes/$child_remote_branch"
                 # Check if the remote branch actually exists before comparing
-                if git show-ref --verify --quiet "refs/remotes/$child_remote_branch"; then
+                if git show-ref --verify --quiet "$full_remote_ref"; then
+                    local fetch_time=$(_get_remote_fetch_timestamp "$full_remote_ref")
                     counts_upstream=$(_get_ahead_behind "$child" "$child_remote_branch")
+                    local upstream_status=""
                     if [[ "$counts_upstream" == "0 0" ]]; then
-                        commit_info+=" [vs upstream: current]"
-                    elif [[ -n "$counts_upstream" ]]; then                                                    # Non-empty and not "0 0"
-                        commit_info+=" [vs upstream: ⇡${counts_upstream%% *}, ${counts_upstream##* } behind]" # Use ⇡ for ahead
+                        upstream_status="current"
+                    elif [[ -n "$counts_upstream" ]]; then # Non-empty and not "0 0"
+                        upstream_status="⇡${counts_upstream%% *}, ${counts_upstream##* } behind" # Use ⇡ for ahead
+                    fi
+
+                    if [[ -n "$upstream_status" ]]; then
+                         commit_info+=" [vs upstream ${fetch_time}: ${upstream_status}]"
                     fi
                     # else
                     # Optional: Warn if configured remote doesn't exist?
@@ -873,9 +900,16 @@ sandbox_tree() {
         fi
 
         # Construct the final output line
+        # Construct the final output line
         local final_line="${leading_char}${branch}${commit_info}" # Branch name + commit info (if any)
         if [[ -n "$remote_b" ]]; then
-            final_line+="  <->  $remote_b" # Append remote info if it exists
+            local full_remote_ref="refs/remotes/$remote_b"
+            local fetch_time=""
+            # Check if the remote ref actually exists before trying to get timestamp
+            if git show-ref --verify --quiet "$full_remote_ref"; then
+                 fetch_time=$(_get_remote_fetch_timestamp "$full_remote_ref")
+            fi
+            final_line+="  <->  $remote_b ${fetch_time}" # Append remote info and fetch time if it exists
             printed_remotes["$remote_b"]=1 # Mark remote as printed (moved here)
         fi
 
